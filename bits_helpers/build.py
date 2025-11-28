@@ -468,11 +468,18 @@ def create_provenance_info(package, specs, args):
   })
 
 
-def runBuildCommand(scheduler, p, specs, args, build_command, cachedTarball, scriptDir, workDir, syncHelper):
+def runBuildCommand(scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper):
+  debug_printer = debug if not scheduler else lambda msg: scheduler.debug(msg)
+  log_printer = info if not scheduler else lambda msg: scheduler.log(msg)
   spec = specs[p]
-  debug("Build command: %s", build_command)
-  progress = debug
-  if args.builders==1:
+  cachedTarball = ""
+  if scheduler:
+    cachedTarball = getCachedTarball(spec, args, workDir)
+    if cachedTarball:
+      build_command = build_command.replace("CACHED_TARBALL=''" , "CACHED_TARBALL=%s" % cachedTarball)
+  debug_printer("Build command: %s" % build_command)
+  progress = debug_printer
+  if not scheduler:
     progress = ProgressPrint(
       ("Unpacking %s@%s" if cachedTarball else
        "Compiling %s@%s (use --debug for full output)") %
@@ -480,7 +487,7 @@ def runBuildCommand(scheduler, p, specs, args, build_command, cachedTarball, scr
       args.develPrefix if "develPrefix" in args and spec["is_devel_pkg"] else spec["version"])
     )
   else:
-    scheduler.log (
+    log_printer (
       ("Unpacking %s@%s" if cachedTarball else
       "Compiling %s@%s (use --debug for full output)") %
       (spec["package"],
@@ -512,7 +519,16 @@ def runBuildCommand(scheduler, p, specs, args, build_command, cachedTarball, scr
       if "develPrefix" in args and spec["is_devel_pkg"]
       else "",
   )
-  dieOnError(err, buildErrMsg.strip())
+  if scheduler and err:
+    log_printer (
+      ("Failed to unpack %s@%s" if cachedTarball else
+      "Failed to build %s@%s") %
+      (spec["package"],
+      args.develPrefix if "develPrefix" in args and spec["is_devel_pkg"] else spec["version"])
+    )
+    return buildErrMsg.strip()
+  else:
+    dieOnError(err, buildErrMsg.strip())
 
   updatablePkgs = [dep for dep in spec["requires"] if specs[dep]["is_devel_pkg"]]
   if spec["is_devel_pkg"]:
@@ -549,8 +565,6 @@ def runBuildCommand(scheduler, p, specs, args, build_command, cachedTarball, scr
     except Exception as exc:
       warning("Failed to gather build info: %s", exc)
 
-    dieOnError(err, buildErrMsg.strip())
-
   doFinalSync(spec, specs, args, syncHelper)
 
 
@@ -566,6 +580,32 @@ def doFinalSync(spec, specs, args, syncHelper):
   # produced in a previous run with a read-only remote store.
   if not spec["revision"].startswith("local"):
     syncHelper.upload_symlinks_and_tarball(spec)
+
+
+def getCachedTarball(spec, args, workDir):
+  if spec["is_devel_pkg"]:
+    return ""
+  tar_hash_dir = os.path.join(workDir, resolve_store_path(args.architecture, spec["hash"]))
+  tarballs = glob(os.path.join(tar_hash_dir, "*gz"))
+  if not tarballs:
+    return ""
+  return tarballs[0] if not args.docker else re.sub("^" + workDir, "/sw", tarballs[0])
+
+
+def checkoutSources(scheduler, spec, args, workDir, syncHelper):
+  if spec["is_devel_pkg"]:
+    return
+  printer = debug if not scheduler else lambda msg: scheduler.debug(msg)
+  tar_hash_dir = os.path.join(workDir, resolve_store_path(args.architecture, spec["hash"]))
+  printer("Looking for cached tarball in %s" % tar_hash_dir)
+  syncHelper.fetch_tarball(spec)
+  tarballs = glob(os.path.join(tar_hash_dir, "*gz"))
+  if len(tarballs):
+    printer("Found tarball in %s" % tarballs[0])
+  else:
+    printer("No cache tarballs found")
+    checkout_sources(spec, workDir, args.referenceSources, args.docker)
+  return
 
 
 def doBuild(args, parser):
@@ -889,7 +929,7 @@ def doBuild(args, parser):
     warning("Not rebuilding %s because --only-deps option provided.", mainPackage)
 
   scheduler = None
-  if (args.builders > 1) and buildOrder:
+  if (args.builders > 1) and buildOrder and (not args.makeflow):
     from bits_helpers.scheduler import Scheduler
     from bits_helpers.log import logger
     scheduler = Scheduler(args.builders, logDelegate=logger, buildStats=args.resources)
@@ -1158,16 +1198,6 @@ def doBuild(args, parser):
     # directory contains files with non-ASCII names, e.g. Golang/Boost.
     shutil.rmtree(dirname(hashFile).encode("utf-8"), True)
 
-    tar_hash_dir = os.path.join(workDir, resolve_store_path(args.architecture, spec["hash"]))
-    debug("Looking for cached tarball in %s", tar_hash_dir)
-    spec["cachedTarball"] = ""
-    if not spec["is_devel_pkg"]:
-      syncHelper.fetch_tarball(spec)
-      tarballs = glob(os.path.join(tar_hash_dir, "*gz"))
-      spec["cachedTarball"] = tarballs[0] if len(tarballs) else ""
-      debug("Found tarball in %s" % spec["cachedTarball"]
-            if spec["cachedTarball"] else "No cache tarballs found")
-
     # The actual build script.
     debug("spec = %r", spec)
 
@@ -1180,13 +1210,14 @@ def doBuild(args, parser):
       from pkg_resources import resource_string
       cmd_raw = resource_string("bits_helpers", 'build_template.sh')
 
-    if args.docker:
-      cachedTarball = re.sub("^" + workDir, "/sw", spec["cachedTarball"])
+    build_deps = []
+    cachedTarball = ""
+    if not scheduler:
+      checkoutSources(scheduler, spec, args, workDir, syncHelper)
+      cachedTarball = getCachedTarball(spec, args, workDir)
     else:
-      cachedTarball = spec["cachedTarball"]
-
-    if not cachedTarball:
-      checkout_sources(spec, workDir, args.referenceSources, args.docker)
+      build_deps.append("download:%s" % p)
+      scheduler.parallel("download:%s" % p, [], "download", checkoutSources, scheduler, spec, args, workDir, syncHelper)
 
     scriptDir = join(workDir, "SPECS", args.architecture, spec["package"],
                      spec["version"] + "-" + spec["revision"])
@@ -1285,17 +1316,22 @@ def doBuild(args, parser):
 
     buildTargets.append(p)
     if not args.makeflow:
-      if args.builders == 1:
-        runBuildCommand(scheduler, p, specs, args, build_command, cachedTarball, scriptDir, workDir, syncHelper)
+      if not scheduler:
+        runBuildCommand(scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper)
       else:
-        build_deps = ["build:%s" % d for d in specs[p]["full_requires"] if d in buildTargets]
-        scheduler.parallel("build:%s" % p, build_deps, "build", runBuildCommand, scheduler, p, specs, args, build_command,cachedTarball, scriptDir, workDir, syncHelper)
+        build_deps += ["build:%s" % d for d in specs[p]["full_requires"] if d in buildTargets]
+        scheduler.parallel("build:%s" % p, build_deps, "build", runBuildCommand, scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper)
     else:
       breq  = " ".join([str(element) + ".build" for element in spec["full_requires"] if element in buildTargets])
       buildList.append((p,build_command,cachedTarball,breq))
 
-  if (not args.makeflow) and (args.builders > 1) and buildTargets:
+  if scheduler:
     scheduler.run()
+    for (action, error) in scheduler.errors.items():
+      if action != "final-job":
+        info("* The action \"%s\" was not completed successfully because %s" % (action, error))
+    if scheduler.brokenJobs:
+      dieOnError(True, "Terminating build")
   elif args.makeflow and buildTargets:
     mFlow = "makeflow"
     mfDir = join(workDir, "BUILD", spec["hash"], "makeflow")

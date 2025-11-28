@@ -75,7 +75,8 @@ class ProgressPrint:
       return
     if self.count == -1 and self.begin_msg:
       sys.stderr.write("\033[1;35m==>\033[m " + self.begin_msg)
-    txt %= args
+    if args:
+      txt %= args
     self.erase()
     m = re.search(r"((^|[^0-9])([0-9]{1,2})%|\[([0-9]+)/([0-9]+)\])", txt)
     if m:

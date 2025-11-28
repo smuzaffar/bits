@@ -62,7 +62,7 @@ def execute(command, printer=debug, timeout=None):
 def monitor_progress(popen, printer=debug, timeout=None):
   start_time = time.time()
   for line in iter(popen.stdout.readline, b""):
-    printer("%s", decode_with_fallback(line).strip("\n"))
+    printer("%s" % decode_with_fallback(line).strip("\n"))
     if timeout is not None and time.time() > start_time + timeout:
       popen.terminate()
       break
