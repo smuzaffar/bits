@@ -132,14 +132,9 @@ class Scheduler(object):
   def __releaseWorker(self):
     self.parallelThreads -= 1
 
-  def parallel(self, taskId, deps, taskType, *spec):
+  def parallel(self, taskId, deps, taskType, priorty, *spec):
     if taskId in self.jobs: return
-    self.jobs[taskId] = {"taskType": taskType, "scheduler": "parallel", "deps": deps, "spec":spec, "priorty": 1}
-    if taskType in ["build", "download", "fetch"]:
-      try:
-          self.jobs[taskId]["priorty"] = 100000-spec[1].requiredBy
-      except:
-          self.jobs[taskId]["priorty"] = 1
+    self.jobs[taskId] = {"taskType": taskType, "scheduler": "parallel", "deps": deps, "spec":spec, "priorty": priorty}
     self.pendingJobs.append(taskId)
     self.finalJobDeps.append(taskId)
 
@@ -181,7 +176,7 @@ class Scheduler(object):
     forceJobs = []
     bldCount = self.runningJobsCount["max_build"]-self.runningJobsCount["build"]
     dwnCount = self.runningJobsCount["max_download"]-self.runningJobsCount["download"]
-    for task in sorted(allJobs, key=lambda k: k['priorty']):
+    for task in sorted(allJobs, key=lambda k: k['priorty'], reverse=True):
       taskId = task["id"]
       taskType = self.jobs[taskId]["taskType"]
       if taskType == "download":

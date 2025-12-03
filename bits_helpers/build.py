@@ -933,6 +933,12 @@ def doBuild(args, parser):
     from bits_helpers.scheduler import Scheduler
     from bits_helpers.log import logger
     scheduler = Scheduler(args.builders, logDelegate=logger, buildStats=args.resources)
+    for pkg in buildOrder:
+      specs[pkg]["used_by_count"] = 0
+    for pkg in buildOrder:
+      spec = specs[pkg]
+      for dep in spec.get("full_requires", ()):
+        specs[dep]["used_by_count"] += 1
 
   while buildOrder:
     p = buildOrder.pop(0)
@@ -1217,7 +1223,7 @@ def doBuild(args, parser):
       cachedTarball = getCachedTarball(spec, args, workDir)
     else:
       build_deps.append("download:%s" % p)
-      scheduler.parallel("download:%s" % p, [], "download", checkoutSources, scheduler, spec, args, workDir, syncHelper)
+      scheduler.parallel("download:%s" % p, [], "download", spec["used_by_count"], checkoutSources, scheduler, spec, args, workDir, syncHelper)
 
     scriptDir = join(workDir, "SPECS", args.architecture, spec["package"],
                      spec["version"] + "-" + spec["revision"])
@@ -1320,7 +1326,7 @@ def doBuild(args, parser):
         runBuildCommand(scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper)
       else:
         build_deps += ["build:%s" % d for d in specs[p]["full_requires"] if d in buildTargets]
-        scheduler.parallel("build:%s" % p, build_deps, "build", runBuildCommand, scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper)
+        scheduler.parallel("build:%s" % p, build_deps, "build", spec["used_by_count"], runBuildCommand, scheduler, p, specs, args, build_command, scriptDir, workDir, syncHelper)
     else:
       breq  = " ".join([str(element) + ".build" for element in spec["full_requires"] if element in buildTargets])
       buildList.append((p,build_command,cachedTarball,breq))
